@@ -1,11 +1,16 @@
 package com.chasacademy.airobust.client;
 
+import com.chasacademy.airobust.dto.AiResponseDto;
 import com.chasacademy.airobust.dto.OpenAiChatRequest;
 import com.chasacademy.airobust.dto.OpenAiChatResponse;
 import com.chasacademy.airobust.exception.AiServiceUnavailableException;
+import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import jakarta.annotation.PostConstruct;
+import jakarta.validation.ConstraintViolation;
+import jakarta.validation.Validator;
 import java.util.List;
+import java.util.Set;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
@@ -61,11 +66,13 @@ public class AiClientService {
     private long initialBackoffMs;
 
     private final ObjectMapper objectMapper;
+    private final Validator validator;
 
     private RestClient restClient;
 
-    public AiClientService(ObjectMapper objectMapper) {
+    public AiClientService(ObjectMapper objectMapper, Validator validator) {
         this.objectMapper = objectMapper;
+        this.validator = validator;
     }
 
     /**
@@ -147,15 +154,65 @@ public class AiClientService {
     }
 
     /**
+     * Analyzes the sentiment of {@code userText} and returns a validated,
+     * trustworthy {@link AiResponseDto} - never a raw, unchecked AI reply.
+     *
+     * <p>This is the method application code should call. It composes the
+     * full reliability pipeline: deterministic prompting, timeout-bound
+     * HTTP, retry/backoff on rate limits, and finally parsing + validation
+     * with a safe fallback (Step 5) so a hallucinated or malformed reply can
+     * never crash or corrupt downstream logic.
+     */
+    public AiResponseDto analyzeSentiment(String userText) {
+        String rawJson = callModel(userText);
+        return parseAndValidate(rawJson);
+    }
+
+    /**
      * Calls the AI provider with the given user text and returns the raw
      * assistant reply (expected to be a clean JSON string per {@link
      * #SYSTEM_PROMPT}). Transparently retries with exponential backoff if the
      * provider rate-limits us (see {@link #postWithBackoff}).
      */
-    public String callModel(String userText) {
+    private String callModel(String userText) {
         OpenAiChatRequest payload = buildRequestPayload(userText);
         String rawBody = postWithBackoff(payload);
         return extractAssistantMessage(rawBody);
+    }
+
+    /**
+     * Parses the AI's raw reply into {@link AiResponseDto} and validates it
+     * before trusting it anywhere else in the app. Two independent safety
+     * nets are applied, in order:
+     * <ol>
+     *   <li><b>JSON parsing</b> - catches replies that are not even valid
+     *       JSON (e.g. a conversational preamble slipped in despite the
+     *       system prompt forbidding it).</li>
+     *   <li><b>Bean Validation</b> - catches replies that parse fine but
+     *       violate our business rules (e.g. an out-of-range confidence
+     *       score, or an invented sentiment value). This is the
+     *       syntactically-correct-but-wrong case: a hallucination that looks
+     *       like good data until you check it.</li>
+     * </ol>
+     * Either failure returns {@link AiResponseDto#fallback()} instead of
+     * letting a bad AI reply propagate further.
+     */
+    private AiResponseDto parseAndValidate(String rawJson) {
+        AiResponseDto dto;
+        try {
+            dto = objectMapper.readValue(rawJson, AiResponseDto.class);
+        } catch (JsonProcessingException ex) {
+            log.warn("AI reply was not valid JSON; falling back to a safe default. Raw reply: {}", rawJson);
+            return AiResponseDto.fallback();
+        }
+
+        Set<ConstraintViolation<AiResponseDto>> violations = validator.validate(dto);
+        if (!violations.isEmpty()) {
+            log.warn("AI reply failed validation ({}); falling back to a safe default.", violations);
+            return AiResponseDto.fallback();
+        }
+
+        return dto;
     }
 
     /**

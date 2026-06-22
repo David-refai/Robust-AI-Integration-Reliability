@@ -1,6 +1,7 @@
 package com.chasacademy.airobust.client;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import jakarta.validation.Validation;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.NullAndEmptySource;
@@ -18,7 +19,7 @@ class AiClientServiceTest {
     @NullAndEmptySource
     @ValueSource(strings = {"   "})
     void startupFailsFastWhenApiKeyIsMissingOrBlank(String invalidKey) {
-        AiClientService service = new AiClientService(new ObjectMapper());
+        AiClientService service = new AiClientService(new ObjectMapper(), Validation.buildDefaultValidatorFactory().getValidator());
         ReflectionTestUtils.setField(service, "apiKey", invalidKey);
 
         assertThatIllegalStateException()
@@ -28,7 +29,7 @@ class AiClientServiceTest {
 
     @Test
     void startupSucceedsWhenApiKeyIsPresent() {
-        AiClientService service = new AiClientService(new ObjectMapper());
+        AiClientService service = new AiClientService(new ObjectMapper(), Validation.buildDefaultValidatorFactory().getValidator());
         ReflectionTestUtils.setField(service, "apiKey", "sk-test-key");
 
         service.validateConfiguration();
