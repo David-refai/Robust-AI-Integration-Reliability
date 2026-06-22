@@ -6,11 +6,15 @@ import com.chasacademy.airobust.exception.AiServiceUnavailableException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import jakarta.annotation.PostConstruct;
 import java.util.List;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.MediaType;
 import org.springframework.http.client.SimpleClientHttpRequestFactory;
 import org.springframework.stereotype.Service;
+import org.springframework.web.client.HttpClientErrorException;
+import org.springframework.web.client.ResourceAccessException;
 import org.springframework.web.client.RestClient;
 
 /**
@@ -24,6 +28,8 @@ import org.springframework.web.client.RestClient;
  */
 @Service
 public class AiClientService {
+
+    private static final Logger log = LoggerFactory.getLogger(AiClientService.class);
 
     /**
      * Loaded from the OPENAI_API_KEY environment variable (see application.properties).
@@ -45,6 +51,14 @@ public class AiClientService {
     /** Max time to wait for a response once connected. LLM calls are slow, but never unbounded. */
     @Value("${ai.client.read-timeout-ms}")
     private int readTimeoutMs;
+
+    /** How many times to attempt the call before giving up on a persistent 429. */
+    @Value("${ai.client.max-retries}")
+    private int maxRetries;
+
+    /** Delay before the first retry; doubles after every subsequent 429 (exponential backoff). */
+    @Value("${ai.client.initial-backoff-ms}")
+    private long initialBackoffMs;
 
     private final ObjectMapper objectMapper;
 
@@ -133,20 +147,63 @@ public class AiClientService {
     }
 
     /**
-     * Calls the AI provider once with the given user text and returns the raw
+     * Calls the AI provider with the given user text and returns the raw
      * assistant reply (expected to be a clean JSON string per {@link
-     * #SYSTEM_PROMPT}). This is the "happy path" call; retry/backoff is added
-     * on top of it separately (see Step 4).
+     * #SYSTEM_PROMPT}). Transparently retries with exponential backoff if the
+     * provider rate-limits us (see {@link #postWithBackoff}).
      */
     public String callModel(String userText) {
         OpenAiChatRequest payload = buildRequestPayload(userText);
-
-        String rawBody = restClient.post()
-            .body(payload)
-            .retrieve()
-            .body(String.class);
-
+        String rawBody = postWithBackoff(payload);
         return extractAssistantMessage(rawBody);
+    }
+
+    /**
+     * Sends the request, retrying on HTTP 429 with exponential backoff.
+     *
+     * <p>A single rate-limit response should never surface as a hard failure
+     * to the caller - providers expect clients to back off and retry, so we
+     * do that automatically up to {@code maxRetries} attempts: log a
+     * warning, sleep, double the delay, and try again. A connect/read
+     * timeout is treated as a harder failure and is not retried, since
+     * retrying immediately into a provider that is already hanging is more
+     * likely to make things worse than better.
+     */
+    private String postWithBackoff(OpenAiChatRequest payload) {
+        long delayMs = initialBackoffMs;
+
+        for (int attempt = 1; attempt <= maxRetries; attempt++) {
+            try {
+                return restClient.post()
+                    .body(payload)
+                    .retrieve()
+                    .body(String.class);
+            } catch (HttpClientErrorException.TooManyRequests ex) {
+                if (attempt == maxRetries) {
+                    throw new AiServiceUnavailableException(
+                        "AI provider rate-limited the request after " + maxRetries + " attempts.", ex);
+                }
+                log.warn("Rate limited by AI provider (attempt {}/{}). Backing off for {} ms.",
+                    attempt, maxRetries, delayMs);
+                sleep(delayMs);
+                delayMs *= 2;
+            } catch (ResourceAccessException ex) {
+                throw new AiServiceUnavailableException("AI provider did not respond in time.", ex);
+            }
+        }
+
+        // Unreachable when maxRetries >= 1 (every loop path above returns or throws),
+        // but required so the compiler can see every path returns or throws.
+        throw new AiServiceUnavailableException("AI provider rate-limited the request after " + maxRetries + " attempts.");
+    }
+
+    private void sleep(long millis) {
+        try {
+            Thread.sleep(millis);
+        } catch (InterruptedException ex) {
+            Thread.currentThread().interrupt();
+            throw new AiServiceUnavailableException("Interrupted while waiting to retry the AI provider.", ex);
+        }
     }
 
     /**
