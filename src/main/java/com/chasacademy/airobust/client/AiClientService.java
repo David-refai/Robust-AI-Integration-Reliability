@@ -19,8 +19,8 @@ import org.springframework.http.MediaType;
 import org.springframework.http.client.SimpleClientHttpRequestFactory;
 import org.springframework.stereotype.Service;
 import org.springframework.web.client.HttpClientErrorException;
-import org.springframework.web.client.ResourceAccessException;
 import org.springframework.web.client.RestClient;
+import org.springframework.web.client.RestClientException;
 
 /**
  * Secure proxy to the external LLM provider (OpenAI-compatible Chat Completions API).
@@ -244,7 +244,12 @@ public class AiClientService {
                     attempt, maxRetries, delayMs);
                 sleep(delayMs);
                 delayMs *= 2;
-            } catch (ResourceAccessException ex) {
+            } catch (RestClientException ex) {
+                // Covers both a connect/read timeout (ResourceAccessException, thrown
+                // while waiting for a response) and a timeout that occurs while the
+                // body is still streaming in (which Spring reports as a plain
+                // RestClientException from its message-converter layer instead).
+                // Either way, the provider failed to respond in time.
                 throw new AiServiceUnavailableException("AI provider did not respond in time.", ex);
             }
         }

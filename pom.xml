@@ -32,10 +32,12 @@
 			<scope>test</scope>
 		</dependency>
 		<!-- Mocks the OpenAI HTTP endpoint in tests so timeouts, 429s and
-		     malformed responses can be triggered deterministically (Step 6). -->
+		     malformed responses can be triggered deterministically (Step 6).
+		     The "standalone" artifact bundles its own embedded HTTP server
+		     (the plain "wiremock" module no longer ships one). -->
 		<dependency>
 			<groupId>org.wiremock</groupId>
-			<artifactId>wiremock</artifactId>
+			<artifactId>wiremock-standalone</artifactId>
 			<version>3.13.1</version>
 			<scope>test</scope>
 		</dependency>
