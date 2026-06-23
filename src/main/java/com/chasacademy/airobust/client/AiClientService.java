@@ -19,6 +19,7 @@ import org.springframework.http.MediaType;
 import org.springframework.http.client.SimpleClientHttpRequestFactory;
 import org.springframework.stereotype.Service;
 import org.springframework.web.client.HttpClientErrorException;
+import org.springframework.web.client.HttpStatusCodeException;
 import org.springframework.web.client.RestClient;
 import org.springframework.web.client.RestClientException;
 
@@ -221,10 +222,14 @@ public class AiClientService {
      * <p>A single rate-limit response should never surface as a hard failure
      * to the caller - providers expect clients to back off and retry, so we
      * do that automatically up to {@code maxRetries} attempts: log a
-     * warning, sleep, double the delay, and try again. A connect/read
-     * timeout is treated as a harder failure and is not retried, since
-     * retrying immediately into a provider that is already hanging is more
-     * likely to make things worse than better.
+     * warning, sleep, double the delay, and try again.
+     *
+     * <p>Every other failure is reported with its real cause instead of being
+     * lumped together as "a timeout": an HTTP error response (401, 403, 500,
+     * ...) means the provider answered but rejected the request, which is not
+     * the same problem as a connect/read timeout where no response arrived at
+     * all. Neither is retried here, since retrying an auth failure or an
+     * already-hanging connection is unlikely to help.
      */
     private String postWithBackoff(OpenAiChatRequest payload) {
         long delayMs = initialBackoffMs;
@@ -244,12 +249,22 @@ public class AiClientService {
                     attempt, maxRetries, delayMs);
                 sleep(delayMs);
                 delayMs *= 2;
+            } catch (HttpStatusCodeException ex) {
+                // The provider answered, just not with success - e.g. 401 (bad/missing
+                // API key), 403, or 500. Retrying would not help here, so this fails
+                // immediately with the real status code instead of being mistaken for
+                // a timeout. The response body is logged (server-side only) since it
+                // often contains the provider's own explanation (e.g. "invalid_api_key").
+                log.error("AI provider rejected the request with HTTP {}. Response body: {}",
+                    ex.getStatusCode().value(), ex.getResponseBodyAsString());
+                throw new AiServiceUnavailableException(
+                    "AI provider rejected the request with HTTP " + ex.getStatusCode().value() + ".", ex);
             } catch (RestClientException ex) {
                 // Covers both a connect/read timeout (ResourceAccessException, thrown
                 // while waiting for a response) and a timeout that occurs while the
                 // body is still streaming in (which Spring reports as a plain
                 // RestClientException from its message-converter layer instead).
-                // Either way, the provider failed to respond in time.
+                // Either way, no HTTP response was ever received in time.
                 throw new AiServiceUnavailableException("AI provider did not respond in time.", ex);
             }
         }

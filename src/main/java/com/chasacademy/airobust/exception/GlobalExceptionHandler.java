@@ -32,7 +32,12 @@ public class GlobalExceptionHandler {
      */
     @ExceptionHandler(AiServiceUnavailableException.class)
     public ResponseEntity<ErrorResponse> handleAiServiceUnavailable(AiServiceUnavailableException ex) {
-        log.error("AI service unavailable: {}", ex.getMessage());
+        // Logged with the full cause chain (not just ex.getMessage()) so anyone
+        // running this service - including someone testing it without a real,
+        // working API key - can see the *actual* root exception (e.g. a 401 from
+        // the provider) in the server console, not just the generic client-facing
+        // message below.
+        log.error("AI service unavailable: {}", ex.getMessage(), ex);
         return ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE)
             .body(new ErrorResponse("AI_SERVICE_UNAVAILABLE", ex.getMessage()));
     }

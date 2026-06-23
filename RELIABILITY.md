@@ -36,30 +36,37 @@ from a fundamentally text-in/text-out system.
 
 ## 2. Error Mitigation
 
-Three independent failure modes are handled, each at the layer where it naturally occurs:
+Four independent failure modes are handled, each at the layer where it naturally occurs:
 
 | Failure mode | Where it's caught | Mechanism |
 |---|---|---|
 | Provider hangs or is slow | `AiClientService.postWithBackoff` | Strict `connect`/`read` timeouts on the `RestClient`'s `SimpleClientHttpRequestFactory` (2s / 8s by default). A timeout surfaces as `RestClientException`/`ResourceAccessException`, wrapped into `AiServiceUnavailableException` - never a hung server thread. |
 | `429 Too Many Requests` | `AiClientService.postWithBackoff` | Caught specifically as `HttpClientErrorException.TooManyRequests`, retried up to `ai.client.max-retries` (default 3) times with exponential backoff (`Thread.sleep`, starting at 1000ms and doubling). If every attempt is rate-limited, the failure is wrapped into `AiServiceUnavailableException` rather than thrown raw. |
+| Provider answers but rejects the request (e.g. `401` for a bad/missing key, `403`, `500`) | `AiClientService.postWithBackoff` | Caught as `HttpStatusCodeException` and reported with its **real status code** (e.g. "rejected the request with HTTP 401") instead of being lumped in with a timeout - retrying an auth failure would not help, so it fails immediately. The response body is logged server-side, since providers often explain the rejection there. |
 | Hallucinated / malformed reply | `AiClientService.parseAndValidate` | Two safety nets: (1) `ObjectMapper.readValue` catches replies that are not valid JSON at all; (2) Jakarta Bean Validation (`@NotNull`, `@Pattern`, `@Min`, `@Max`, `@NotBlank`, `@Size` on `AiResponseDto`) catches replies that parse fine but violate the business rules - an invented sentiment value, an out-of-range score. Either failure returns `AiResponseDto.fallback()` instead of propagating bad data. |
 
-A fourth failure mode - missing configuration - is treated even more strictly: `AiClientService`
+A fifth failure mode - missing configuration - is treated even more strictly: `AiClientService`
 fails **fast**, at startup, via `@PostConstruct`, if the API key is missing or blank. A misconfigured
 deployment should never get far enough to make a single request; it should fail loudly the moment it
 starts, not silently on the first real user request.
 
-All three runtime failure modes converge on a single exception type, `AiServiceUnavailableException`,
-which `GlobalExceptionHandler` maps to a `503 Service Unavailable` with a clean JSON error body. The
+All four runtime failure modes converge on a single exception type, `AiServiceUnavailableException`,
+which `GlobalExceptionHandler` maps to a `503 Service Unavailable` with a clean JSON error body and
+logs the *full* cause chain server-side (`log.error(..., ex)`, not just the message). That distinction
+matters in practice: the client-facing message stays short and safe to expose, while anyone with
+access to the server console - including someone testing this project without a real, funded API key -
+can see exactly what went wrong (a 401 from an invalid key looks nothing like a genuine timeout in the
+logs, even though both used to collapse into the same generic message before this was added). The
 caller of `POST /api/sentiment/analyze` never sees a raw stack trace, regardless of which of these
-three things went wrong upstream.
+four things went wrong upstream.
 
 These behaviors are exercised automatically, not just asserted in this document:
 [`AiClientServiceEdgeCaseTest`](src/test/java/com/chasacademy/airobust/client/AiClientServiceEdgeCaseTest.java)
 points `AiClientService` at a WireMock server standing in for OpenAI and deliberately forces each
-scenario above - a delayed response past the read timeout, a `429` that resolves after two retries, a
-`429` that never resolves, a conversational non-JSON reply, and a syntactically valid but
-rule-violating reply - and asserts on the resulting behavior. This was chosen over the lab's suggested
+scenario above - a delayed response past the read timeout, a `401` that must not be retried, a `429`
+that resolves after two retries, a `429` that never resolves, a conversational non-JSON reply, and a
+syntactically valid but rule-violating reply - and asserts on the resulting behavior. This was chosen
+over the lab's suggested
 approach of manually editing timeout values or standing up a throwaway controller, because a mocked
 HTTP layer is repeatable, runs unattended in CI, and never requires hand-editing production
 configuration to prove the safety nets work.

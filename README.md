@@ -149,12 +149,26 @@ Successful response:
 }
 ```
 
-If the AI provider is unreachable, times out, or stays rate-limited past the retry budget:
+If the AI provider is unreachable or times out:
 
 ```http
 HTTP/1.1 503 Service Unavailable
 {"code": "AI_SERVICE_UNAVAILABLE", "message": "AI provider did not respond in time."}
 ```
+
+If the AI provider rejects the request - for example, **`OPENAI_API_KEY` is set to a placeholder or
+expired value**, which is the most common thing to hit while trying this project out without a real,
+funded OpenAI account:
+
+```http
+HTTP/1.1 503 Service Unavailable
+{"code": "AI_SERVICE_UNAVAILABLE", "message": "AI provider rejected the request with HTTP 401."}
+```
+
+This is reported with the real HTTP status from the provider rather than being lumped in with a
+timeout, so the cause is obvious from the response alone. The full underlying exception (including the
+provider's response body, when present) is also written to the server log - run with `./mvnw
+spring-boot:run` and watch the console if you need more detail than the client-facing message gives.
 
 If the request body itself is invalid (blank or overlong text):
 

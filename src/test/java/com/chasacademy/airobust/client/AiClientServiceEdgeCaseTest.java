@@ -81,6 +81,21 @@ class AiClientServiceEdgeCaseTest {
     }
 
     @Test
+    void forcedAuthFailure_reportsRealStatusInsteadOfTimeoutAndDoesNotRetry() {
+        // A 401 means the provider answered and rejected the request (e.g. a bad/missing
+        // API key) - a fundamentally different problem from "no response arrived at all",
+        // and one retrying will never fix.
+        wireMock.stubFor(post(urlEqualTo(ENDPOINT_PATH)).willReturn(aResponse().withStatus(401)));
+
+        assertThatThrownBy(() -> aiClientService.analyzeSentiment("Anything"))
+            .isInstanceOf(AiServiceUnavailableException.class)
+            .hasMessageContaining("HTTP 401")
+            .hasMessageNotContaining("did not respond in time");
+
+        wireMock.verify(1, postRequestedFor(urlEqualTo(ENDPOINT_PATH)));
+    }
+
+    @Test
     void forced429_retriesWithBackoffThenSucceeds() throws Exception {
         // First two attempts are rate-limited; the third (still within maxRetries) succeeds.
         wireMock.stubFor(post(urlEqualTo(ENDPOINT_PATH))
